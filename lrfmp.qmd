@@ -1,0 +1,459 @@
+---
+title: "Customer Segmentation with LRFMP Model"
+author: "Hua Dai Nam"
+date: 2024-04-08
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: show
+    code-line-numbers: true
+    theme: journal
+editor: visual
+---
+
+# Introduction
+
+The main purpose of this project is to learn how to identify different customer segments in the retail industry using **K-Means** clustering method.
+
+# Library
+
+The following are the required packages that will be used throughout the project. It consists of packages for data wrangling, clustering, and data visualization.
+
+```{python}
+# data wrangling
+import pandas as pd
+import numpy as np
+
+# visualization
+import matplotlib.pyplot as plt
+
+# clustering
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+
+# no limit to the number of columns that will be displayed
+pd.set_option("display.max_columns", None)
+
+```
+
+# Data understanding
+
+The data is acquired from [UC Irvine Machine Learning Repository](https://archive.ics.uci.edu/dataset/352/online+retail). This is a transnational data that contains all the transactions occurring between 01/12/2010 and 09/12/2011 for a UK-based and registered non-store online retail. The company mainly sells unique all-occasion gifts. Many customers of the company are wholesalers. This project will segment customers based on their transactions.
+
+## Read the data
+
+```{python}
+file_path = r"./data/Online Retail.xlsx"
+
+df = pd.read_excel(file_path, sheet_name="Online Retail")
+
+df.head(5)
+```
+
+## Inspect the data
+
+```{python}
+def get_n_row_col(df: pd.DataFrame):
+  df_shape = df.shape
+  n_rows = "{:,}".format(df_shape[0])
+  n_columns = "{:,}".format(df_shape[1])
+  return n_rows, n_columns
+
+n_rows, n_columns = get_n_row_col(df)
+print(f"This data has {n_rows} rows and {n_columns} columns.")
+```
+
+Basic information of the data:
+```{python}
+df.info()
+```
+
+Data description:
+
+- `InvoiceNo`: a 6-digit integral number uniquely assigned to each transaction. If this code starts with letter **C**, it indicates a cancellation.
+- `StockCode`: a 5-digit integral number uniquely assigned to each distinct product.
+- `Description`: product name.
+- `Quantity`: the quantities of each product (item) per transaction.
+- `InvoiceDate`: the day and time when each transaction was generated.
+- `UnitPrice`: product price per unit.
+- `CustomerID`: a 5-digit integral number uniquely assigned to each customer.
+- `Country`: the name of the country where each customer resides.
+
+Initially, convert the data type of the `CustomerID` column to *object* to accurately reflect the nature data type of this column:
+
+```{python}
+# convert each cell to string, preserving NaN values
+# NaN values remain as NaN after conversion 
+# and are still considered as null values
+df["CustomerID"] = df["CustomerID"].apply(lambda x: str(int(x)) if not pd.isnull(x) else np.nan)
+```
+
+Describe the data
+
+```{python}
+df.describe(include=["object"])
+```
+
+```{python}
+df.describe(include=["number"])
+```
+
+Note that both the `Quantity` and `UnitPrice` columns contain negative values as their minimums. These negative values neither generate revenue for the company nor are considered valid within the context of this project.
+
+# Data preparation
+
+## Data cleansing
+
+Filter the data to include only rows where both the `Quantity` and `UnitPrice` columns contain values greater than zero:
+
+```{python}
+df = df[(df["Quantity"] > 0) & (df["UnitPrice"] > 0)]
+```
+
+Display the total number of null values and their respective percentages compared to the total number of records per column:
+
+```{python}
+def null_summary(df: pd.DataFrame) -> pd.DataFrame:
+    total_null = df.isnull().sum().map("{:,}".format)
+    percentage_null = ((df.isnull().sum() / len(df)) * 100).map("{:,.2f}%".format)
+    result = pd.concat([total_null, percentage_null], axis=1, keys=["Total null", "Percentage null"])
+    return result
+
+null_summary_result = null_summary(df)
+
+null_summary_result
+```
+
+Set the **threshold** to handle with null values:
+
+- `the percentage of null values > threshold`: remove null value records to avoid excessive distortion of the data.
+- `the percentage of null values < threshold`: fill null values with the dummy data based on the context (ffill, bfill, linear, polynomial, etc.).
+
+In this scenario, employ the *mean* method to handle missing values in numerical data, and *mode* method to handle missing values in the categorical data:
+
+```{python}
+# function to automate handle null values of all column
+def handle_null_values(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+  df_clean = df.copy()
+  for col in df_clean.columns:
+      percentage_null = (df_clean[col].isnull().sum() / len(df_clean[col])) * 100
+      if percentage_null == 0:
+        continue
+      else:
+        if percentage_null > threshold:
+            df_clean.dropna(subset=col, inplace=True)
+        else:
+            # numeric column
+            if df_clean[col].dtype in ["int64", "float64"]:
+                mean_val = df_clean[col].mean()
+                df_clean[col].fillna(value=mean_val, inplace=True)
+            # categorical (object) column
+            else:
+                mode_val = df_clean[col].mode()[0]
+                df_clean[col].fillna(value=mode_val, inplace=True)
+  return df_clean
+
+threshold = 0.05 # 5%
+df = handle_null_values(df, threshold)
+
+# check null values after handeling
+null_summary_result = null_summary(df)
+
+null_summary_result
+```
+
+Count the number of canceled and non-cancelled transactions based on the `InvoiceNo` column:
+
+```{python}
+df["InvoiceNo"] = df["InvoiceNo"].astype(str)
+
+count_c_invoice = df[df["InvoiceNo"].str.startswith("C")]["InvoiceNo"].count()
+
+count_non_c_invoice = df[~df["InvoiceNo"].str.startswith("C")]["InvoiceNo"].count()
+
+result = pd.DataFrame({
+    "Invoice type": ["Start with \"C\"", "Remain"],
+    "Total transactions": [count_c_invoice, count_non_c_invoice]
+})
+
+result
+```
+
+Transactions with an `InvoiceNo` starting with `C` are absent due to the absence of negative values in the `Quantity` column. These negative values were eliminated from the data, which underwent filtering to include only entries where `Quantity` and `UnitPrice` were greater than zero.
+
+Generate a new column to retain the date from the `InvoiceDate` field and another column to compute `Sales` derived from `Quantity` and `UnitPrice`:
+
+```{python}
+df["InvoiceDate_date"] = df["InvoiceDate"].dt.date
+df["InvoiceDate_date"] = pd.to_datetime(df["InvoiceDate_date"])
+
+df["Sales"] = df["Quantity"] * df["UnitPrice"]
+
+df.head(5)
+```
+
+```{python}
+n_rows, n_columns = get_n_row_col(df)
+
+print(f"The cleaned data now consists of {n_rows} rows and {n_columns} columns.")
+```
+
+## LRFMP model
+
+The model builds upon the traditional *RFM* model by incorporating two new variables: `Length` and `Periodicity`. Here are the definitions of each variable:
+
+- `Length`: represents the time interval, measured in days, between a customer's first and last visits. It serves as an indicator of customer loyalty, with higher values indicating greater loyalty.
+- `Recency`: denotes the number of days between a customer's last visit and the end of the observation period. A lower Recency value implies recent transaction activity.
+- `Frequency`: refers to the total number of visits made by a customer during the observation period. Higher frequencies are indicative of increased customer loyalty.
+- `Monetary`: reflects the average amount of money spent per visit by the customer during the observation period, highlighting their contribution to the company's revenue.
+- `Periodicity`: represents the average time between transactions for a customer.
+
+To start, compute the `Length`, `Recency`, `Frequency`, and `Monetary` metrics for each `CustomerID`:
+
+```{python}
+# group by "CustomerID" and perform summarization
+df_agg_1 = df.groupby("CustomerID").agg(
+    TotalVisits=("InvoiceDate_date", "nunique"),
+    TotalSales=("Sales", "sum"),
+    FirstOrderDate=("InvoiceDate_date", "min"),
+    LastOrderDate=("InvoiceDate_date", "max")
+)
+
+# calculate additional metrics
+observation_max_date = df["InvoiceDate_date"].max()
+df_agg_1["Length"] = (df_agg_1["LastOrderDate"] - df_agg_1["FirstOrderDate"]).dt.days
+df_agg_1["Recency"] = (observation_max_date - df_agg_1["LastOrderDate"]).dt.days
+df_agg_1["Frequency"] = df_agg_1["TotalVisits"]
+df_agg_1["Monetary"] = df_agg_1["TotalSales"] / df_agg_1["TotalVisits"]
+
+df_agg_1.head(5)
+```
+
+Then, calculate the `Periodicity` metric for each `CustomerID`:
+
+```{python}
+# duplicate values must be dropped to eliminate instances 
+# where a customer makes multiple transactions on the same date
+df_agg_2 = df[["CustomerID", "InvoiceDate_date"]].drop_duplicates()
+
+# sort the data by "CustomerID" and "InvoiceDate_date" before calculating the "LagDate"
+df_agg_2 = df_agg_2.sort_values(["CustomerID", "InvoiceDate_date"])
+
+# shift each value within the group down by 1 "row" from its original position
+# -> this creates a new column in the DataFrame, 
+# where each value is the purchase date of the corresponding customer in the previous purchase
+df_agg_2["LagDate"] = df.groupby("CustomerID")["InvoiceDate_date"].shift(1)
+
+df_agg_2 = df_agg_2.dropna(subset=["LagDate"])
+
+df_agg_2["IntervalDay"] = (df_agg_2["InvoiceDate_date"] - df_agg_2["LagDate"]).dt.days
+
+df_agg_2 = df_agg_2.groupby("CustomerID").agg(Periodicity=("IntervalDay", "median")).reset_index()
+
+df_agg_2.head()
+```
+
+Finally, combine both dataframe to gain the complete *LRFM* values for each `CustomerID`:
+
+```{python}
+df_final = df_agg_1.merge(df_agg_2, how="left", on="CustomerID")
+
+df_final = df_final[["CustomerID", "Length", "Recency", "Frequency", "Monetary", "Periodicity"]]
+
+df_final = df_final.set_index("CustomerID")
+
+df_final.head(5)
+```
+
+## Single purchase customer
+
+Basic information of the df_final:
+
+```{python}
+df_final.info()
+```
+
+Describe the df_final:
+
+```{python}
+df_final.describe()
+```
+
+*NaN* values in the `Periodicity` column suggest that the customer has only made a single transaction with the company (`Frequency` = 1) and has not returned for subsequent purchases.
+
+From a marketing perspective, separate campaigns can be designed specifically for these customers to encourage them to make a second purchase:
+
+```{python}
+null_periodicity = "{:,.0f}".format(len(df_final[df_final["Periodicity"].isnull()]))
+
+print(f"There are {null_periodicity} customers who have only made a single transaction with the company.")
+```
+
+Exclude these customers from further analysis as they do not have sufficient transaction history data:
+
+```{python}
+df_final = df_final.dropna(subset="Periodicity")
+
+null_summary_result = null_summary(df_final)
+
+null_summary_result
+```
+
+## Scaling variables
+
+Clustering algorithm will calculate the distance between data point, commonly using the *euclidean* distance:
+
+$$
+distance(a, b) = \sqrt {\Sigma_{i=1}^n (a_i - b_i)^2}
+$$
+
+Directly feeding the data into the clustering algorithm will result in the `Monetary` variable having a more significant influence on distance calculations compared to the remaining variables, given its wider range of values. Therefore, for optimal results, it's essential that all variables are on the same scale. To address this issue, the data should be scaled using the *standard normal distribution*:
+
+$$
+Z = \frac{x - \mu}{\sigma}
+$$
+
+```{python}
+scaler = StandardScaler()
+
+df_scaled = scaler.fit_transform(df_final)
+
+df_scaled = pd.DataFrame(df_scaled, columns=df_final.columns, index=df_final.index)
+
+df_scaled.head(5)
+```
+
+# Segmenting customers
+
+## Clustering with LRFMP
+
+### Determine number of clusters
+
+Commence customer segmentation using the **K-Means** algorithm.
+
+Initially, determine the optimal number of clusters, which can be assessed through various metrics. The most common metric is the *within sum of squares (WSS)*, representing the distance between each data point and its respective cluster centroid. Another useful metric is the *silhouette score*.
+
+> The Silhouette Score evaluates the efficacy of a clustering algorithm by considering both the compactness of individual clusters (intra-cluster distance) and the separation between clusters (inter-cluster distance), resulting in an overall score that gauges the algorithm's performance.
+
+The Silhouette Score ranges from -1 to 1, with the following interpretations:
+
+- `silhouette score = 1`: data points are perfectly assigned to clusters, and clusters are clearly distinguishable.
+- `silhouette score = 0`: clusters overlap.
+- `silhouette score = -1`: data points are incorrectly assigned to clusters.
+
+Below are the WSS and silhouette scores for different numbers of clusters in this project:
+
+```{python}
+sil_score = np.zeros(20)
+wss_score = np.zeros(20)
+
+for i in range(1, 20):
+  x = i + 1
+  
+  # cluster the data
+  clust_temp = KMeans(n_clusters=x, random_state=15, n_init="auto").fit(df_scaled)
+  labels = clust_temp.labels_
+  
+  # calculate Silhouette Score
+  sil_score[i] = silhouette_score(df_scaled, labels, metric="euclidean")
+  
+  # calculate Within Sum of Square
+  wss_score[i] = clust_temp.inertia_
+  
+trial_clust = pd.DataFrame({
+    "n_cluster" : pd.to_numeric(list(range(1, 20))) + 1,
+    "silhouette_score" : sil_score[1:],
+    "wss_score" : wss_score[1:]
+})
+
+# highlight optimal number of cluster based on highest "silhouette_score"
+p_1 = trial_clust[trial_clust["silhouette_score"] == trial_clust["silhouette_score"].max()]
+
+p_1
+```
+
+Below is the visualization of the *Silhouette Score* results. According to the analysis, the optimal number of clusters is `6`, as it yields the highest silhouette score.
+
+```{python}
+plt.plot(trial_clust["n_cluster"].astype("str"), trial_clust["silhouette_score"])
+plt.scatter(p_1["n_cluster"].astype("str"), p_1["silhouette_score"], s=100)
+plt.title("Silhouette Score for Different Numbers of Clusters")
+plt.xlabel("Number of Cluster") 
+plt.ylabel("Silhouette Score")
+
+plt.show()
+plt.close()
+```
+
+The determination of the optimal number of clusters using *WSS* is somewhat nuanced, as there is no definitive value to select. Instead, the "elbow" or the point must be identified where the decrease in WSS is no longer significant.
+
+Below is the visualization of the *WSS* results. The absence of a clear elbow suggests that the curve does not exhibit a sharp decline. A cluster count between 6 and 8 might represent the optimal number of clusters.
+
+```{python}
+plt.plot(trial_clust["n_cluster"].astype("str"), trial_clust["wss_score"])
+plt.scatter(trial_clust["n_cluster"].astype("str"), trial_clust["wss_score"], s=10)
+plt.title("Within Sum of Square for Different Numbers of Clusters")
+plt.xlabel("Number of Cluster") 
+plt.ylabel("Within Sum of Square")
+
+plt.show()
+plt.close()
+```
+
+### Clustering
+
+Determining the optimal number of clusters can be challenging, especially in datasets with numerous variables and dimensions. This decision is further complicated by factors such as domain expertise and the business implications of the clustering outcome. Rather than focusing solely on a predetermined cluster count, it's beneficial to prioritize the quality of the cluster results. In this particular scenario, opting for **cluster = 4** provides a simpler and more interpretable outcome, avoiding the complexity associated with a larger number of clusters. Additionally, this choice facilitates the effective grouping of outlier or high/low-performing customers, leading to clearer insights.
+
+```{python}
+k_clust = KMeans(n_clusters=4, random_state=15, n_init="auto").fit(df_scaled)
+
+
+list_cluster = pd.DataFrame({"CustomerID" : list(df_final.index), "Cluster" : k_clust.labels_})
+
+df_out = df_final.reset_index().merge(list_cluster, how="left", on="CustomerID")
+
+df_out.head(5)
+```
+
+### Profiling customers
+
+After assigning a cluster segment to each customer, the next step involves profiling the different segments and identifying the variations between them. This can be achieved by obtaining the centroid of the mean of each variable from each cluster, allowing for the profiling of the members within each cluster.
+
+```{python}
+summary = df_out.groupby("Cluster").agg(
+  TotalCustomers=("CustomerID", "nunique"),
+  LengthMean=("Length", "mean"),
+  RecencyMean=("Recency", "mean"),
+  FrequecyMean=("Frequency", "mean"),
+  MonetaryMean=("Monetary", "mean"),
+  PeriodicityMean=("Periodicity", "mean")
+)
+
+summary["PercentOfTotalCustomers"] = (summary["TotalCustomers"] / summary["TotalCustomers"].sum()) * 100
+
+to_format_cols = ["LengthMean", "RecencyMean", "FrequecyMean", "MonetaryMean", "PeriodicityMean", "PercentOfTotalCustomers"]
+
+for col in to_format_cols:
+  summary[col] = summary[col].map("{:,.2f}".format)
+
+summary.sort_values("TotalCustomers", ascending = False)
+```
+
+**Cluster 0**
+
+Cluster 0 represents a significant portion of the customer base, comprising 34.05% of all customers. This cluster stands out for its exceptional loyalty, as evidenced by the highest average length of relationship (`LengthMean`), frequency of visits (`FrequencyMean`), and recent transaction activity, indicated by the lowest average recency (`RecencyMean`). Moreover, customers in this cluster contribute the most revenue to the company, boasting the highest average monetary spend per visit (`MonetaryMean`). These customers transact with the company on average once every 43 days, which is the shortest interval among all four clusters. *Given their substantial value, it is imperative for the company to prioritize retention efforts aimed at this segment.*
+
+**Cluster 1**
+
+Cluster 1 comprises the largest number of customers, representing 35.41% of the total customer base. While the loyalty indicators within this cluster are not exceptionally high, the revenue generated is substantial, trailing Cluster 0 by only approximately 10 units. This underscores the significance of these customers in contributing revenue to the company. *Implementing targeted strategies to enhance customer loyalty within this segment is crucial for the company's continued success.*
+
+**Cluster 2**
+
+Cluster 2 comprises the smallest customer base, making up 13.41% of the total customer count. Despite its smaller size, this cluster significantly contributes to the company's revenue, as indicated by (`MonetaryMean` = 402.44). However, when considering metrics such as `LengthMean`, `RecencyMean`, and `FrequencyMean`, it becomes evident that this customer segment lacks loyalty. Although the `PeriodicityMean` suggests that these customers tend to make purchases roughly every two months, their frequency of visits (`FrequencyMean` = 2.66) remains relatively low. *While this cluster represents a walk-in customer base, there exists an opportunity for the company to implement targeted strategies aimed at enhancing customer retention and attracting more frequent purchases, particularly given the substantial revenue generated by this customer segment.*
+
+**Cluster 3**
+
+Cluster 3 represents a modest portion of the customer base, comprising approximately 17.13% of the total number of customers. Metrics such as `LengthMean`, `RecencyMean`, and `FrequencyMean` suggest that loyalty is lacking within this cluster. Furthermore, with the lowest `MonetaryMean` and the highest `PeriodicityMean` among the four clusters, it is evident that *the customers in this cluster do not contribute significantly to the company's value.*
