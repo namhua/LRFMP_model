@@ -1,1 +1,1 @@
-# LRFMP_model
+# LRFMP model
